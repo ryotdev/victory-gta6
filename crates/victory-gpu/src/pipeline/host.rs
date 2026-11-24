@@ -844,6 +844,9 @@ fn root_signature(
 }
 
 #[cfg(test)]
+pub(crate) use tests::bench_mesh_pipeline;
+
+#[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
@@ -861,6 +864,32 @@ mod tests {
             t[0] = uint3(0, 1, 2);
         }";
     const PS: &str = "float4 main() : SV_Target { return 1; }";
+
+    /// Build the synthetic triangle stages for the indirect-command benchmark.
+    pub(crate) fn bench_mesh_pipeline(
+        device: &ID3D12Device,
+        root: &ID3D12RootSignature,
+    ) -> ID3D12PipelineState {
+        let compiler = dxc().expect("set VICTORY_PC_DXC to the PC dxc.exe");
+        let dir = tempfile::tempdir().unwrap();
+        let ms = compile(&compiler, dir.path(), MS, "ms_6_5");
+        let ps = compile(&compiler, dir.path(), PS, "ps_6_5");
+        let mut g = GraphicsState::default();
+        g.depth.DepthEnable = false.into();
+        g.rasterizer.CullMode = D3D12_CULL_MODE_NONE;
+        g.targets.NumRenderTargets = 1;
+        g.targets.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        let name = super::super::library::name("indirect mesh benchmark", &[], &[&ms, &ps], &g.describe());
+        mesh_pipeline(
+            device,
+            root,
+            code(&ms),
+            code(&ps),
+            &g,
+            &name,
+        )
+        .expect("synthetic mesh pipeline")
+    }
 
     /// The PC `dxc.exe` (`VICTORY_PC_DXC`, else the newest Windows SDK's).
     fn dxc() -> Option<PathBuf> {
