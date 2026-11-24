@@ -480,14 +480,9 @@ fn lane_uniform(p: &Program, st: &Structured, all: &[bool]) -> HashSet<Value> {
                         Operand::Vector { reg, dwords } => {
                             // every dword of the operand the instruction reads (not the old value
                             // of a higher-numbered destination register that IR keeps for guards)
-                            let end = reg.saturating_add(dwords);
-                            let read: Vec<Value> = inst
-                                .reads
-                                .iter()
-                                .filter(|r| matches!(r.0, Reg::V(x) if x >= reg && x < end))
-                                .map(|r| r.1)
-                                .collect();
-                            !read.is_empty() && read.iter().all(|x| same.contains(x))
+                            (0..dwords).all(|i| {
+                                inst.read(Reg::V(reg + i)).is_some_and(|x| same.contains(&x))
+                            })
                         }
                         // a scalar is one value; a lane mask is not, unless a compare of such values made it
                         Operand::Scalar { code, dwords } if code != NULL => {
@@ -11370,6 +11365,30 @@ mod tests {
         assert!(f10(0x3FF).is_nan());
         // A 16-bit float is a half already, sign included.
         assert_eq!(half(0xBC00 << half_shift(16)), -1.0);
+    }
+
+    #[test]
+    fn wave_uniformity_includes_the_last_vector_register() {
+        for (high, uniform) in [(0x7FFE_0300, false), (0x7FFE_0281, true)] {
+            let words = [
+                0x7FFC_0280, // v_mov_b32 v254, 0
+                high,        // v_mov_b32 v255, v0 (per lane) or 1 (uniform)
+                0xD700_0004, // v_lshrrev_b64 v[4:5], 32, v[254:255]
+                0x0003_FCA0,
+                0x7E0C_03FF, // v_mov_b32 v6, v255
+                S_ENDPGM,
+            ];
+            let code: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            let program = ir::build(&code, true, 256).unwrap();
+            let flow = structure::structure(&program).unwrap();
+            let all = super::all_lane_blocks(&flow).unwrap();
+            let same = super::lane_uniform(&program, &flow, &all);
+            // Both instructions copy v255 into their low result.
+            for (i, reg) in [(2, 4), (3, 6)] {
+                let result = program.blocks[0].insts[i].write(ir::Reg::V(reg)).unwrap();
+                assert_eq!(same.contains(&result), uniform, "v{reg}, uniform v255: {uniform}");
+            }
+        }
     }
 
     #[test]
