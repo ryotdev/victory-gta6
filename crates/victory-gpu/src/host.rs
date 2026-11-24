@@ -1507,6 +1507,13 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
         if (lane < stride) {
             uint4 a = shared_h[lane];
             uint4 b = shared_h[lane + stride];
+            // Avalanche the right child before XOR (MurmurHash3 fmix32).
+            // Otherwise identical bit changes in both children cancel.
+            b ^= b >> 16;
+            b *= 0x85EBCA6Bu;
+            b ^= b >> 13;
+            b *= 0xC2B2AE35u;
+            b ^= b >> 16;
             a = (a ^ b) * uint4(0x01000193u, 0x9E3779B1u, 0x85EBCA77u, 0xC2B2AE3Du);
             shared_h[lane] = a.yzwx ^ (a >> 15);
         }

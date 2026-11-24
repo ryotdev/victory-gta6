@@ -733,6 +733,14 @@ void main() {
             unsafe { now_ptr.add(offset).write_volatile(content[offset]) };
             assert_eq!(run(&mut warp, 1), [0, 0, 0]);
         }
+        // Change the sign bit of the same component in the last loads of
+        // lanes 0 and 32. They are paired in the first reduction step.
+        for offset in [PIECE - 1024 + 3, PIECE - 1024 + 32 * 16 + 3] {
+            // SAFETY: both bytes are in the first mapped piece.
+            unsafe { now_ptr.add(offset).write_volatile(content[offset] ^ 0x80) };
+        }
+        assert_eq!(run(&mut warp, 2), [1, 0, 0]);
+        assert_eq!(run(&mut warp, 1), [0, 0, 0]);
         // Swap lane 0's first 16 bytes with lane 1's first 16 bytes in piece 1.
         // SAFETY: both 16-byte blocks are inside piece 1 of the mapped buffer.
         unsafe {
