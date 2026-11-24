@@ -2370,6 +2370,8 @@ impl State {
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
             .map(|w| (w.scratch.clone(), offset - w.base));
+        #[cfg(feature = "diagnostics")]
+        let mesh_sample = kind == MESH && max == 1 && !windows() && crate::mesh_timing::sample();
         let (bounded, at) = match hit {
             Some(hit) => hit,
             None => {
@@ -2404,11 +2406,19 @@ impl State {
                 let count_arg = counter.as_ref().map(|(s, at)| (&s.buffer, s.offset(*at)));
                 // More than the record asked for: a window clamped ahead,
                 // whose unfilled slots must not spend the list's budget.
+                #[cfg(feature = "diagnostics")]
+                if mesh_sample {
+                    list.note_op(|| crate::mesh_timing::BOUND_BEGIN.to_owned());
+                }
                 let bounded = if windowed && records > 1 {
                     crate::indirect::bound_ahead(list, (&args.buffer, offset), (kind, step, records))
                 } else {
                     crate::indirect::bound(list, (&args.buffer, offset), count_arg, (kind, step, records))
                 };
+                #[cfg(feature = "diagnostics")]
+                if mesh_sample {
+                    list.note_op(|| crate::mesh_timing::BOUND_END.to_owned());
+                }
                 let Some(bounded) = bounded else {
                     self.window = None;
                     why("not bounded (no clamp, or arguments not 4-byte aligned)");
@@ -2439,13 +2449,13 @@ impl State {
             why("prepare failed");
             return false;
         }
+        if kind == MESH {
+            self.mesh_scissor(list, true);
+        }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
-        if kind == MESH {
-            self.mesh_scissor(list, true);
-        }
         // SAFETY: an open list with everything set; the scratch buffer and
         // host copies are kept alive by the list, and the signature is cached.
         unsafe {
@@ -2458,6 +2468,10 @@ impl State {
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
         };
+        #[cfg(feature = "diagnostics")]
+        if mesh_sample {
+            list.note_op(|| crate::mesh_timing::EXEC_END.to_owned());
+        }
         if kind == MESH {
             self.mesh_scissor(list, false);
         }

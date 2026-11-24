@@ -34,6 +34,8 @@ mod indirect;
 #[cfg(windows)]
 mod inplace;
 pub mod list;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod mesh_timing;
 pub mod object;
 pub mod pipeline;
 #[cfg(windows)]

@@ -1046,6 +1046,9 @@ fn page_faults() -> u64 {
 pub(crate) fn log(frames: f64) {
     let counted = COUNT[C::Frames as usize].swap(0, Relaxed);
     let frames = if counted > 0 { counted as f64 } else { frames };
+    if crate::mesh_timing::enabled() {
+        crate::mesh_timing::report(frames);
+    }
     static FAULTS: AtomicU64 = AtomicU64::new(0);
     let faults = page_faults();
     let faults = faults - FAULTS.swap(faults, Relaxed).min(faults);
