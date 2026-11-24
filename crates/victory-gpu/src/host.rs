@@ -4046,7 +4046,7 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             if timing() {
                 // SAFETY: a plain query.
-                let frequency = unsafe { self.queue.GetTimestampFrequency() }.unwrap_or(1);
+                let frequency = unsafe { self.queue.GetTimestampFrequency() }.unwrap_or(0);
                 for (ms, op) in runs[i].slowest(frequency, usize::MAX, true) {
                     crate::copystat::command_took(&op, ms);
                 }
@@ -4057,7 +4057,7 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             if timing() && started.elapsed() > std::time::Duration::from_millis(50) {
                 // SAFETY: a plain query.
-                let frequency = unsafe { self.queue.GetTimestampFrequency() }.unwrap_or(1);
+                let frequency = unsafe { self.queue.GetTimestampFrequency() }.unwrap_or(0);
                 let commands = runs[i].notes.lock().unwrap_or_else(|e| e.into_inner()).len();
                 tracing::warn!(ms = started.elapsed().as_millis(), commands, "slow host list");
                 for (ms, op) in runs[i].slowest(frequency, 6, false) {
