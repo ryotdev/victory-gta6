@@ -2132,6 +2132,13 @@ pub(crate) fn uav_texture_at(address: u64, desc: &[u32; 14], view_format: u32) -
     }
     let mut map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(&existing) = map.get(&(address, r)) {
+        // A temporary target at this address may have replaced this texture
+        // and since been released. Restore the alias only if the slot is vacant.
+        TARGETS_AT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(address)
+            .or_insert(existing);
         return Some(existing as This);
     }
     // SAFETY: 56 bytes in the description's layout.
@@ -2346,6 +2353,48 @@ mod tests {
         creation_nodes: 0,
         visible_nodes: 0,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn cached_placed_uav_is_visible_after_releasing_a_temporary_target() {
+        static TITLE_BYTES: [u8; 4096] = [0; 4096];
+        let address = TITLE_BYTES.as_ptr() as u64;
+        let srv = [3, 0, 0, 0, 4, 0, 4, 0x1_0001, 67, 1, 0, 0, 0, 0];
+        let uav = uav_texture_at(address, &srv, 42).unwrap();
+        let view = texture_at(address, &srv).unwrap();
+        assert_eq!(alias_of(view), Some(uav));
+
+        // The title uses the storage temporarily for a different shape.
+        let mut other = texture(8, 4, 42, 1);
+        other.flags = 4;
+        let mut target = std::ptr::null();
+        assert_eq!(
+            create_at_address(
+                std::ptr::null(),
+                address,
+                &other,
+                0,
+                std::ptr::null(),
+                &RESOURCE_IIDS[0],
+                &mut target,
+            ),
+            S_OK
+        );
+        let mut temporary_srv = srv;
+        temporary_srv[4] = 8;
+        let temporary_view = texture_at(address, &temporary_srv).unwrap();
+        assert_eq!(uav_texture_at(address, &srv, 42), Some(uav));
+        assert_eq!(
+            alias_of(temporary_view),
+            Some(target),
+            "keep the active target"
+        );
+        assert_eq!(resource_release(target), 0);
+
+        // Mirror the original placed UAV again, then resolve its paired SRV.
+        assert_eq!(uav_texture_at(address, &srv, 42), Some(uav));
+        assert_eq!(alias_of(view), Some(uav), "restore the cached target");
+    }
 
     fn buffer(width: u64) -> ResourceDesc {
         ResourceDesc {
