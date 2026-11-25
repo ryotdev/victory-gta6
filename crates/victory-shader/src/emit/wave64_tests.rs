@@ -450,3 +450,52 @@ fn scc_of_a_mask_operation_joined_with_a_scalar_test_needs_the_skip_wave_wide() 
     }
     eprintln!("ran on the hardware device: the inner test's SCC for every lane once some lane is inside");
 }
+
+/// Each lane's end is 1 or 2, alternating across a wave. VCCNZ keeps
+/// the whole wave looping while one lane still has work. VCCZ keeps it
+/// looping until the first lane matches. Both paths terminate in at most
+/// two iterations.
+#[test]
+fn a_vcc_loop_tests_the_mask_in_its_original_direction() {
+    let Ok(host) = Host::new(true) else {
+        eprintln!("no SM 6.6 WARP device; not run");
+        return;
+    };
+    for (compare, branch, expected) in [
+        (0x7D84_0406, 0xBF86_FFFD, 1), // s6 == v2, branch back on VCCZ
+        (0x7D82_0406, 0xBF87_FFFD, 2), // s6 < v2, branch back on VCCNZ
+    ] {
+        let words = [
+            0x3604_0081, // v_and_b32 v2, 1, v0
+            0x4A04_0481, // v_add_nc_u32 v2, 1, v2
+            0xBE86_0380, // s_mov_b32 s6, 0
+            0x8006_8106, // s_add_u32 s6, s6, 1
+            compare,
+            branch,
+            0x7E02_0206, // v_mov_b32 v1, s6
+            0x3406_0082, // v_lshlrev_b32 v3, 2, v0
+            0xE070_1000,
+            0x8002_0103, // buffer_store_dword v1, v3, s[8:11], 0 offen
+        ];
+        let native = native_of(&words, false, 32);
+        let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+        let shader = lowered(&native, &p, &HashSet::new()).unwrap();
+        let (root, pso) = host.compute_pipeline(&shader).unwrap();
+        let out = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(
+                        0,
+                        Root::Constants(vec![0; shader.user_data_dwords().max(1) as usize]),
+                    )],
+                    views: &[View::RawUav(32)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .unwrap();
+        assert_eq!(out[0], [expected; 32], "branch {branch:#x}");
+    }
+}
