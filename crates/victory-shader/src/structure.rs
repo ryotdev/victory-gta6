@@ -424,6 +424,8 @@ pub struct Structured {
     pub masks: HashMap<Value, Bool>,
     /// Exact Wave64 pairs for checking masks at their uses.
     paired_masks: Map<Key, Bool>,
+    /// Exact word pairs consumed by a v_cndmask after separate scalar copies.
+    copied_select_masks: Map<Key, Bool>,
     /// Wave64 masks: low dword's value by the high dword's.
     pub highs: HashMap<Value, Value>,
     /// Masks (low dwords) set only in lanes whose EXEC bit is set where
@@ -446,6 +448,10 @@ pub struct Structured {
 }
 
 impl Structured {
+    pub(crate) fn copied_select_mask(&self, low: Value, high: Value) -> Option<Bool> {
+        self.copied_select_masks.get(&(low, high)).copied()
+    }
+
     pub(crate) fn mask_bits(&self, low: Value, high: Option<Value>) -> Option<Bool> {
         match high {
             Some(high) => self.paired_masks.get(&(low, high)),
@@ -838,7 +844,24 @@ impl<'a> Lanes<'a> {
         }
         self.masks.retain(|k, _| !split.contains(&k.0));
         self.active.retain(|lo| !split.contains(lo));
+        // Keep copied pairs out of the scalar mask exports. Several copies of a low
+        // word can share a high word, whose ballot belongs at its original definition.
+        let mut copied_select_masks = Map::default();
+        if self.p.wave64 {
+            for inst in blocks.iter().flat_map(|b| &b.insts) {
+                if inst.name() != "v_cndmask_b32" { continue; }
+                let Fields::Valu(v) = &inst.fields else { continue };
+                let Some(Operand::Scalar { code, dwords: 2 }) = v.src.get(2) else { continue };
+                let Some(k) = self.key(|r| inst.read(r), *code) else { continue };
+                if self.masks.contains_key(&k) || copied_select_masks.contains_key(&k) { continue; }
+                let source = (self.scalar_copy_source(k.0), self.scalar_copy_source(k.1));
+                if source != k && let Some(&bits) = self.masks.get(&source) {
+                    copied_select_masks.insert(k, bits);
+                }
+            }
+        }
         Ok(Structured {
+            copied_select_masks,
             masks: self.masks.iter().map(|(&(lo, _), &m)| (lo, m)).collect(),
             highs: self
                 .masks
@@ -1177,6 +1200,22 @@ impl<'a> Lanes<'a> {
             }
             _ => return None,
         })
+    }
+
+    // A scalar dword move preserves every bit, including the bits for inactive lanes.
+    // Stop at phis, immediates, and anything that computes a value.
+    fn scalar_copy_source(&self, mut value: Value) -> Value {
+        while let Some(&(block, index)) = self.defs.get(&value) {
+            let writer = &self.p.blocks[block].insts[index];
+            if writer.name() != "s_mov_b32" {
+                break;
+            }
+            let Fields::Sop { src, .. } = &writer.fields else { break };
+            let [Operand::Scalar { code, dwords: 1 }] = src.as_slice() else { break };
+            let Some(source) = writer.read(Reg::S(*code)) else { break };
+            value = source;
+        }
+        value
     }
 
     /// Records the masks `inst` defines; `exec` is EXEC there, if known.
@@ -1843,6 +1882,71 @@ mod tests {
                 .iter()
                 .any(|&e| matches!(s.bools.support(e)[..], [Atom::Lane(_)])),
             "{edges:?}"
+        );
+    }
+
+    #[test]
+    fn a_select_recovers_only_the_original_ordered_pair_of_copied_mask_halves() {
+        let mov = |to: u32, from: u32| 0xbe80_0300 | to << 16 | from;
+        for (low, high, original) in [(11, 10, true), (10, 11, false), (11, 6, false)] {
+            let p = build(
+                &[
+                    0x7D84_0081, // v_cmp_eq_u32 vcc, 1, v0
+                    mov(11, 106),
+                    mov(10, 107),
+                    0x7D84_0082, // overwrite VCC and take only its new high half
+                    mov(6, 107),
+                    mov(2, low),
+                    mov(3, high),
+                    0xD501_0001,
+                    258 | (259 << 9) | (2 << 18),
+                    S_ENDPGM,
+                ],
+                true,
+            );
+            let s = structure(&p).unwrap();
+            let insts = &p.blocks[0].insts;
+            let first = s
+                .mask_bits(
+                    insts[0].write(Reg::S(106)).unwrap(),
+                    insts[0].write(Reg::S(107)),
+                )
+                .unwrap();
+            let select = insts.iter().find(|i| i.name() == "v_cndmask_b32").unwrap();
+            let low = select.read(Reg::S(2)).unwrap();
+            let high = select.read(Reg::S(3)).unwrap();
+            assert_eq!(s.mask_bits(low, Some(high)), None);
+            let recovered = s.copied_select_mask(low, high);
+            assert_eq!(recovered, original.then_some(first));
+        }
+    }
+
+    #[test]
+    fn recovering_a_select_keeps_the_original_high_words_ballot() {
+        let mov = |to: u32, from: u32| 0xbe80_0300 | to << 16 | from;
+        let p = build(
+            &[
+                0x7D84_0081, // v_cmp_eq_u32 vcc, 1, v0
+                mov(11, 106),
+                mov(10, 107),
+                mov(106, 11),
+                0x0202_0480, // select using VCC with its restored low and original high
+                S_ENDPGM,
+            ],
+            true,
+        );
+        let s = structure(&p).unwrap();
+        let insts = &p.blocks[0].insts;
+        let low = insts[0].write(Reg::S(106)).unwrap();
+        let high = insts[0].write(Reg::S(107)).unwrap();
+        let copied = insts[3].write(Reg::S(106)).unwrap();
+        assert_eq!(s.highs[&high], low);
+        assert!(s.active.contains(&low));
+        assert!(!s.active.contains(&copied));
+        assert!(!s.masks.contains_key(&copied));
+        assert_eq!(
+            s.copied_select_mask(copied, high),
+            Some(s.mask_bits(low, Some(high)).unwrap())
         );
     }
 }

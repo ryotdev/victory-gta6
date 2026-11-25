@@ -7256,7 +7256,11 @@ impl<'a> Lower<'a> {
                     _ => None,
                 };
                 const UNTRACKED: Why = "a select on an untracked mask";
-                let cond = match mask.and_then(|m| self.x.st.masks.get(&m).copied()) {
+                let known = mask.and_then(|m| self.x.st.masks.get(&m).copied()).or_else(|| {
+                    let Operand::Scalar { code, dwords: 2 } = *v.src.get(2)? else { return None };
+                    self.x.st.copied_select_mask(mask?, inst.read(Reg::S(code + 1))?)
+                });
+                let cond = match known {
                     Some(m) => self.boolean(m, c)?,
                     // A mask the code holds as a number (a constant bit
                     // pattern: every other lane, every other pair...):

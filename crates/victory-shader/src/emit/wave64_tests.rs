@@ -450,3 +450,79 @@ fn scc_of_a_mask_operation_joined_with_a_scalar_test_needs_the_skip_wave_wide() 
     }
     eprintln!("ran on the hardware device: the inner test's SCC for every lane once some lane is inside");
 }
+
+#[test]
+fn copied_mask_select_restores_only_lanes_in_the_original_compare() {
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else { return };
+    for matching_lane in [1u32, 40] {
+        // Compare with a restricted EXEC, park its two words in nonadjacent order,
+        // overwrite VCC, then restore EXEC and select on the reassembled pair.
+        let mov = |to: u32, from: u32| 0xbe80_0300 | to << 16 | from;
+        let body = [
+            0x7E04_0287,
+            0x7E06_0289, // v2=7, v3=9
+            0x7D88_0000,
+            0xBE8E_246A, // restrict EXEC to t < s0, saving it in s[14:15]
+            0x7D84_0080 + matching_lane,
+            mov(19, 106),
+            mov(18, 107),
+            0x7D84_0081,
+            mov(2, 19),
+            mov(3, 18),
+            0xBEFE_040E,
+            0xD501_0001,
+            258 | (259 << 9) | (2 << 18),
+            0x3406_0082,
+            0xE070_1000,
+            0x8002_0103,
+        ];
+        let native = native_of(&body, true, 64);
+        let p = crate::spill::build(&native).unwrap();
+        let control = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&control)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let bytes = crate::dxbc::build(&[]);
+        let c = crate::Container::parse(&bytes).unwrap();
+        let was = lower::TEST_HOST_WAVE.replace(Some(32));
+        let shader = super::emit(&c, &native, &p, &control, &io, &res).unwrap();
+        lower::TEST_HOST_WAVE.set(was);
+        let (root, pso) = host.compute_pipeline(&shader).unwrap();
+
+        for threshold in [0u32, 1, 16, 32, 48, 64] {
+            let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                if (u.root, u.slot, u.dword) == (RootType::Constants, 0, 0) {
+                    ud[u.index as usize] = threshold;
+                }
+            }
+            let actual = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(ud))],
+                        views: &[View::RawUav(64)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap();
+            let expected: Vec<_> = (0..64)
+                .map(|i| {
+                    if i == matching_lane && matching_lane < threshold {
+                        9
+                    } else {
+                        7
+                    }
+                })
+                .collect();
+            assert_eq!(
+                actual[0], expected,
+                "matching lane {matching_lane}, active prefix {threshold}"
+            );
+        }
+    }
+}
